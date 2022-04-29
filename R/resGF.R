@@ -1203,6 +1203,10 @@ cumimp.combinedGradientForest <-
     res
   }
 
+myrandomforest <- function (x, ...) {
+  UseMethod("myrandomforest")
+}
+
 
 randomForest.formula <-
   function(formula, data = NULL, ..., subset, na.action = na.fail) {
