@@ -524,7 +524,7 @@ gradientForest <- function (data, predictor.vars, response.vars, ntree = 10, mtr
 #' f1 <- gradientForest(data.frame(Ysimulation,Xsimulation), preds, specs, ntree=10)
 #' f1
 #' @export
-myrandomForest <- function (x, y = NULL, xtest = NULL, ytest = NULL, ntree = 500,
+randomForest.default <- function (x, y = NULL, xtest = NULL, ytest = NULL, ntree = 500,
                           mtry = if (!is.null(y) && !is.factor(y)) max(floor(ncol(x)/3),
                                                                        1) else floor(sqrt(ncol(x))), replace = TRUE, classwt = NULL,
                           cutoff, strata, sampsize = if (replace) nrow(x) else ceiling(0.632 *

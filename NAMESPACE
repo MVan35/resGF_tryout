@@ -3,5 +3,5 @@
 S3method(importance,randomForest)
 export(get_importance)
 export(gradientForest)
-export(myrandomForest)
+export(randomForest.default)
 export(resGF)
