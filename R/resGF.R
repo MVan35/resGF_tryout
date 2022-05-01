@@ -479,6 +479,275 @@ gradientForest <- function (data, predictor.vars, response.vars, ntree = 10, mtr
 
 
 
+
+importance <- function(x, ...)  UseMethod("importance")
+
+importance.default <- function(x, ...)
+  stop("No method implemented for this class of object")
+
+
+#' Extract variable importance measure
+#' This is the extractor function for variable importance measures as produced by randomForest.
+#'
+#' Here are the definitions of the variable importance measures. For each tree, the prediction accuracy on the out-of-bag portion of the data is recorded. Then the same is done after permuting each predictor variable. The difference between the two accuracies are then averaged over all trees, and normalized by the standard error. For regression, the MSE is computed on the out-of-bag data for each tree, and then the same computed after permuting a variable. The differences are averaged and normalized by the standard error. If the standard error is equal to 0 for a variable, the division is not done (but the measure is almost always equal to 0 in that case).
+#'
+#'The second measure is the total decrease in node impurities from splitting on the variable, averaged over all trees. For classification, the node impurity is measured by the Gini index. For regression, it is measured by residual sum of squares.
+#'
+#'
+#' @param x an object of class randomForest
+#' @param type either 1 or 2, specifying the type of importance measure (1=mean decrease in accuracy, 2=mean decrease in node impurity).
+#' @param class for classification problem, which class-specific measure to return.
+#' @return A (named) vector of importance measure, one for each predictor variable.
+#' @examples
+#' set.seed(4543)
+#' data(mtcars)
+#' mtcars.rf <- randomForest(mpg ~ ., data=mtcars, ntree=1000, keep.forest=FALSE, importance=TRUE)
+#' importance(mtcars.rf)
+#' importance(mtcars.rf, type=1)
+#' @export
+importance.randomForest <- function(x, type=NULL, class=NULL, scale=TRUE,
+                                    ...) {
+  if (!inherits(x, "randomForest"))
+    stop("x is not of class randomForest")
+  classRF <- x$type != "regression"
+  hasImp <- !is.null(dim(x$importance)) || ncol(x$importance) == 1
+  hasType <- !is.null(type)
+  if (hasType && type == 1 && !hasImp)
+    stop("That measure has not been computed")
+  allImp <- is.null(type) && hasImp
+  if (hasType) {
+    if (!(type %in% 1:2)) stop("Wrong type specified")
+    if (type == 2 && !is.null(class))
+      stop("No class-specific measure for that type")
+  }
+
+  imp <- x$importance
+  if (hasType && type == 2) {
+    if (hasImp) imp <- imp[, ncol(imp), drop=FALSE]
+  } else {
+    if (scale) {
+      SD <- x$importanceSD
+      imp[, -ncol(imp)] <-
+        imp[, -ncol(imp), drop=FALSE] /
+        ifelse(SD < .Machine$double.eps, 1, SD)
+    }
+    if (!allImp) {
+      if (is.null(class)) {
+        ## The average decrease in accuracy measure:
+        imp <- imp[, ncol(imp) - 1, drop=FALSE]
+      } else {
+        whichCol <- if (classRF) match(class, colnames(imp)) else 1
+        if (is.na(whichCol)) stop(paste("Class", class, "not found."))
+        imp <- imp[, whichCol, drop=FALSE]
+      }
+    }
+  }
+  imp
+}
+
+
+
+getSplitImproveCompact <- function(fit, bins) {
+  #   Return a data-frame: var name, rsq, split value, improvement
+  #   Compact the splits into bins defined by bins matrix
+  #   The i'th bin for predictor p is the interval (bin[i,p],bin[i+1,p])
+  #   Every predictor is split into the same number of bins (nrow(bins)-1)
+
+  #   extract all trees to a matrix and select for splits with some improvement
+  trees <- lapply(1:fit$ntree, function(k) try(getTree(fit, k),silent=TRUE)) #Nick Ellis 10/12/2009
+  ok <- sapply(trees, class) != "try-error"
+  tmp <- do.call("rbind", lapply((1:fit$ntree)[ok], function(k) cbind(tree = k, trees[[k]])))
+  tmp <- tmp[tmp[,"status"]==-3 & zapsmall(tmp[,"improve"]) > 0,c("split var","split point","improve")]
+  colnames(tmp) <- c("var_n","split","improve")
+  rownames(tmp) <- NULL
+
+  #   assign the split to the appropriate bin and aggregate importance in each bin
+  Xnames <- colnames(bins)
+  tmp <- data.frame(var=Xnames[tmp[,"var_n"]], tmp, bin=rep(0,nrow(tmp)))
+  for(p in Xnames) {
+    sub <- with(tmp,var==p)
+    tmp$bin[sub] <- as.numeric(cut(tmp$split[sub], bins[,p], include=TRUE, ordered=TRUE))
+  }
+  tmp <- with(tmp[tmp$bin>0,],agg.sum(improve,list(var,bin),sort.it=TRUE))
+  names(tmp) <- c("var","bin","improve")
+
+  #   Set the split value to the bin centre, but retain the bin number in case
+  #   the bin centre is not appropriate value
+  tmp <- cbind(tmp,split=rep(NA,nrow(tmp)),rsq=fit$rsq[fit$ntree])
+  midpoints <- function(x) 0.5*(x[-1]+x[-length(x)]) # points between equally spaced points
+  for(p in Xnames) {
+    sub <- with(tmp,var==p)
+    tmp$split[sub] <- midpoints(bins[,p])[tmp$bin[sub]]
+  }
+  tmp[,c("var","rsq","split","improve","bin")]
+}
+
+
+getSplitImprove <-function(fit, X) {
+  #   return a data-frame: var name, rsq, var number, split value, improvement
+  trees <- lapply(1:fit$ntree, function(k) try(getTree(fit, k),silent=TRUE)) #Nick Ellis 10/12/2009
+  ok <- sapply(trees, class) != "try-error"
+  tmp <- do.call("rbind", lapply((1:fit$ntree)[ok], function(k) cbind(tree = k, trees[[k]])))
+  tmp <- tmp[tmp[,"status"]==-3 & zapsmall(tmp[,"improve"]) > 0,c("split var","split point","improve")]
+  colnames(tmp) <- c("var_n","split","improve")
+  rownames(tmp)<-NULL     #S.J. Smith 11/05/2009
+  res <- cbind(data.frame(var=names(X)[tmp[,"var_n"]],rsq=rep(fit$rsq[fit$ntree],nrow(tmp))),tmp)
+  ok <- zapsmall(res[,"improve"]) > 0
+  res[ok,]
+}
+
+
+getSplitImproveClassCompact <- function(fit, bins, err0) {
+  #   Return a data-frame: var name, rsq, split value, improvement
+  #   Compact the splits into bins defined by bins matrix
+  #   The i'th bin for predictor p is the interval (bin[i,p],bin[i+1,p])
+  #   Every predictor is split into the same number of bins (nrow(bins)-1)
+
+  #   extract all trees to a matrix and select for splits with some improvement
+  trees <- lapply(1:fit$ntree, function(k) try(getTree(fit, k),silent=TRUE)) #Nick Ellis 10/12/2009
+  ok <- sapply(trees, class) != "try-error"
+  tmp <- do.call("rbind", lapply((1:fit$ntree)[ok], function(k) cbind(tree = k, trees[[k]])))
+  tmp <- tmp[tmp[,"status"]== 1 & zapsmall(tmp[,"improve"]) > 0,c("split var","split point","improve")]
+  colnames(tmp) <- c("var_n","split","improve")
+  rownames(tmp) <- NULL
+
+  #   assign the split to the appropriate bin and aggregate importance in each bin
+  Xnames <- colnames(bins)
+  tmp <- data.frame(var=Xnames[tmp[,"var_n"]], tmp, bin=rep(0,nrow(tmp)))
+  for(p in Xnames) {
+    sub <- with(tmp,var==p)
+    tmp$bin[sub] <- as.numeric(cut(tmp$split[sub], bins[,p], include=TRUE, ordered=TRUE))
+  }
+  tmp <- with(tmp[tmp$bin>0,],agg.sum(improve,list(var,bin),sort.it=TRUE))
+  names(tmp) <- c("var","bin","improve")
+
+  #   Set the split value to the bin centre, but retain the bin number in case
+  #   the bin centre is not appropriate value
+  tmp <- cbind(tmp,split=rep(NA,nrow(tmp)),rsq=rep((err0-fit$err.rate[fit$ntree, "OOB"])/err0, nrow(tmp)))
+  for(p in Xnames) {
+    sub <- with(tmp,var==p)
+    tmp$split[sub] <- midpoints(bins[,p])[tmp$bin[sub]]
+  }
+  tmp[,c("var","rsq","split","improve","bin")]
+}
+
+getSplitImproveClass <-
+  function(fit, X, err0)
+  {
+    #   return a data-frame: var name, rsq, var number, split value, improvement
+    trees <- lapply(1:fit$ntree, function(k) try(getTree(fit, k),silent=TRUE)) #Nick Ellis 10/12/2009
+    ok <- sapply(trees, class) != "try-error"
+    tmp <- do.call("rbind", lapply((1:fit$ntree)[ok], function(k) cbind(tree = k, trees[[k]])))
+    tmp <- tmp[tmp[,"status"]==1,c("split var","split point","improve")]
+    dimnames(tmp) <- list(NULL,c("var_n","split","improve"))
+    res<-cbind(data.frame(var=names(X)[tmp[,"var_n"]],rsq=rep((err0-fit$err.rate[fit$ntree,"OOB"])/err0,nrow(tmp))),tmp)
+    res
+}
+
+
+Impurity.based.measures <-function(obj)
+{
+  #becomes an internal function not usually used by users
+  #Modified 07/10/2009 by SJS re: NE changes for classification trees.
+  dens <- lapply(names(obj$X), function(i) density(na.omit(obj$X[,i]),from=min(na.omit(obj$X[,i])),to=max(na.omit(obj$X[,i]))))
+  dens <- lapply(dens,whiten,lambda=0.90) # hard-coded whitening
+  names(dens) <- names(obj$X)
+  res <- do.call("rbind", lapply(names(obj$result), function(spec) cbind(spec=spec,obj$result[[spec]]))) #added by Smith 13/05/2009
+  res$improve <- pmax(0,res$improve)
+  res$rsq <- pmax(0,res$rsq)   #added by Ellis 12/05/2009
+  res$improve.tot <- tapply(res$improve,res$spec,sum)[res$spec]
+  res$improve.tot.var <- tapply(res$improve,interaction(res$spec,res$var),sum)[interaction(res$spec,res$var)]
+  res$improve.norm <- with(res,improve/improve.tot*rsq)
+  nodup <- !duplicated(res[,1:2])
+  res.u <- res[nodup, c("spec","var","rsq","improve.tot","improve.tot.var")]
+  res.u$rsq <- with(res.u, ifelse(is.na(rsq), 0, rsq))
+  res.u$rsq.var <- with(res.u,rsq*improve.tot.var/improve.tot)
+  list(res=res,res.u=res.u,dens=dens)
+}
+
+
+cumimp <- function (x, ...)
+  UseMethod("cumimp")
+
+cumimp.gradientForest <- function (x, predictor, type=c("Overall","Species")[1], standardize=TRUE, standardize_after=FALSE, ...)
+  {
+    if (!inherits(x,"gradientForest"))
+      stop(paste("'x' must be a gradientForest object"))
+    if (length(predictor) != 1)
+      stop(paste("'predictor' must be a single string"))
+    if (!is.element(predictor,levels(x$res$var)))
+      stop(paste("Predictor",predictor,"does not belong to gradientForest object"))
+    if (is.na(option <- pmatch(type,c("Overall","Species"))))
+      stop(paste('Unmatched type "',type,'". Expecting one of "Overall" or "Species"',sep=''))
+
+    # convert density to its inverse
+    inverse <- function(dens) {dens$y <- 1/dens$y; dens}
+
+    # crude integral
+    crude.integrate <- function(f) sum(f$y)*diff(f$x)[1]
+
+    # normalize f(x) to f(x)/fbar
+    normalize <- function(f) {
+      integral <- try(integrate(approxfun(f,rule=2),lower=min(f$x),upper=max(f$x))$value)
+      if (class(integral)=="try-error") integral <- crude.integrate(f)
+      f$y <- f$y/integral*diff(range(f$x));
+      f
+    }
+
+    getCU <- function(importance.df, Rsq) {
+      if (nrow(importance.df) == 0) {
+        return( list(x=0, y=0))
+      }
+      agg <- with(importance.df, agg.sum(improve.norm, list(split), sort.it=TRUE))
+      cum.split <- agg[,1]
+      height <- agg[,2]
+      if (standardize & standardize_after) # crucial to normalize this case
+        dinv <- normalize(inverse(x$dens[[predictor]]))
+      else dinv <- inverse(x$dens[[predictor]]) #
+      dinv.vals <- approx(dinv$x, dinv$y, cum.split, rule=2)$y
+      if (any(bad <- is.na(height))) {
+        cum.split <- cum.split[!bad]
+        height <- height[!bad]
+        dinv.vals <- dinv.vals[!bad]
+      }
+      if (standardize & !standardize_after) height <- height * dinv.vals
+      height <- height/sum(height)*Rsq
+      if (standardize & standardize_after) height <- height * dinv.vals
+      res <- list(x=cum.split, y=cumsum(height))
+    }
+
+    importance.df <- x$res[x$res$var==predictor,]
+    if (option==1) {
+      res <- getCU(importance.df, importance(x, "Weighted")[predictor])
+    } else {
+      species <- names(x$result)
+      res <- lapply(namenames(species), function(sp)
+        getCU(subset(importance.df, spec==sp), x$imp.rsq[predictor,sp]))
+    }
+    res
+  }
+
+cumimp.combinedGradientForest <-
+  function (x, predictor, weight=c("uniform","species","rsq.total","rsq.mean")[3], gear, ...)
+  {
+    if (!inherits(x,"combinedGradientForest"))
+      stop(paste("'x' must be a gradientForest object"))
+    if (length(predictor) != 1)
+      stop(paste("'predictor' must be a single string"))
+    if (!is.element(predictor,names(x$X)[-1]))
+      stop(paste("Predictor",predictor,"does not belong to combinedGradientForest object"))
+    if (is.na(option <- pmatch(weight,c("uniform","species","rsq.total","rsq.mean"))))
+      stop(paste('Unmatched weight "',weight,'". Expecting one of "uniform", "species", "rsq.total" or "rsq.mean"',sep=""))
+
+    if (missing(gear)) {
+      res <- x$CU[[predictor]][[paste("combined",weight,sep=".")]]
+    } else {
+      res <- x$CU[[predictor]][[gear]]
+    }
+    res
+  }
+
+
 #' randomForest: Classification and Regression with Random Forest
 #' randomForest implements Breiman's random forest algorithm (based on Breiman and Cutler's original Fortran code) for classification and regression.
 #' It can also be used in unsupervised mode for assessing proximities among data points.
@@ -524,16 +793,21 @@ gradientForest <- function (data, predictor.vars, response.vars, ntree = 10, mtr
 #' f1 <- gradientForest(data.frame(Ysimulation,Xsimulation), preds, specs, ntree=10)
 #' f1
 #' @export
+randomForest <- function (x, ...) {
+  UseMethod("randomForest")
+}
+
+
 randomForest.default <- function (x, y = NULL, xtest = NULL, ytest = NULL, ntree = 500,
-                          mtry = if (!is.null(y) && !is.factor(y)) max(floor(ncol(x)/3),
-                                                                       1) else floor(sqrt(ncol(x))), replace = TRUE, classwt = NULL,
-                          cutoff, strata, sampsize = if (replace) nrow(x) else ceiling(0.632 *
-                                                                                         nrow(x)), nodesize = if (!is.null(y) && !is.factor(y)) 5 else 1,
-                          importance = FALSE, localImp = FALSE, nPerm = 1, proximity,
-                          oob.prox = proximity, norm.votes = TRUE, do.trace = FALSE,
-                          keep.forest = !is.null(y) && is.null(xtest), corr.bias = FALSE,
-                          keep.inbag = FALSE, maxLevel = 0, keep.group = FALSE, corr.threshold = 1,
-                          corr.method = "pearson", ...) {
+                                  mtry = if (!is.null(y) && !is.factor(y)) max(floor(ncol(x)/3),
+                                                                               1) else floor(sqrt(ncol(x))), replace = TRUE, classwt = NULL,
+                                  cutoff, strata, sampsize = if (replace) nrow(x) else ceiling(0.632 *
+                                                                                                 nrow(x)), nodesize = if (!is.null(y) && !is.factor(y)) 5 else 1,
+                                  importance = FALSE, localImp = FALSE, nPerm = 1, proximity,
+                                  oob.prox = proximity, norm.votes = TRUE, do.trace = FALSE,
+                                  keep.forest = !is.null(y) && is.null(xtest), corr.bias = FALSE,
+                                  keep.inbag = FALSE, maxLevel = 0, keep.group = FALSE, corr.threshold = 1,
+                                  corr.method = "pearson", ...) {
   addclass <- is.null(y)
   classRF <- addclass || is.factor(y)
   if (!classRF && length(unique(y)) <= 5) {
@@ -935,279 +1209,6 @@ randomForest.default <- function (x, y = NULL, xtest = NULL, ytest = NULL, ntree
   return(out)
 }
 
-
-importance <- function(x, ...)  UseMethod("importance")
-
-importance.default <- function(x, ...)
-  stop("No method implemented for this class of object")
-
-
-#' Extract variable importance measure
-#' This is the extractor function for variable importance measures as produced by randomForest.
-#'
-#' Here are the definitions of the variable importance measures. For each tree, the prediction accuracy on the out-of-bag portion of the data is recorded. Then the same is done after permuting each predictor variable. The difference between the two accuracies are then averaged over all trees, and normalized by the standard error. For regression, the MSE is computed on the out-of-bag data for each tree, and then the same computed after permuting a variable. The differences are averaged and normalized by the standard error. If the standard error is equal to 0 for a variable, the division is not done (but the measure is almost always equal to 0 in that case).
-#'
-#'The second measure is the total decrease in node impurities from splitting on the variable, averaged over all trees. For classification, the node impurity is measured by the Gini index. For regression, it is measured by residual sum of squares.
-#'
-#'
-#' @param x an object of class randomForest
-#' @param type either 1 or 2, specifying the type of importance measure (1=mean decrease in accuracy, 2=mean decrease in node impurity).
-#' @param class for classification problem, which class-specific measure to return.
-#' @return A (named) vector of importance measure, one for each predictor variable.
-#' @examples
-#' set.seed(4543)
-#' data(mtcars)
-#' mtcars.rf <- randomForest(mpg ~ ., data=mtcars, ntree=1000, keep.forest=FALSE, importance=TRUE)
-#' importance(mtcars.rf)
-#' importance(mtcars.rf, type=1)
-#' @export
-importance.randomForest <- function(x, type=NULL, class=NULL, scale=TRUE,
-                                    ...) {
-  if (!inherits(x, "randomForest"))
-    stop("x is not of class randomForest")
-  classRF <- x$type != "regression"
-  hasImp <- !is.null(dim(x$importance)) || ncol(x$importance) == 1
-  hasType <- !is.null(type)
-  if (hasType && type == 1 && !hasImp)
-    stop("That measure has not been computed")
-  allImp <- is.null(type) && hasImp
-  if (hasType) {
-    if (!(type %in% 1:2)) stop("Wrong type specified")
-    if (type == 2 && !is.null(class))
-      stop("No class-specific measure for that type")
-  }
-
-  imp <- x$importance
-  if (hasType && type == 2) {
-    if (hasImp) imp <- imp[, ncol(imp), drop=FALSE]
-  } else {
-    if (scale) {
-      SD <- x$importanceSD
-      imp[, -ncol(imp)] <-
-        imp[, -ncol(imp), drop=FALSE] /
-        ifelse(SD < .Machine$double.eps, 1, SD)
-    }
-    if (!allImp) {
-      if (is.null(class)) {
-        ## The average decrease in accuracy measure:
-        imp <- imp[, ncol(imp) - 1, drop=FALSE]
-      } else {
-        whichCol <- if (classRF) match(class, colnames(imp)) else 1
-        if (is.na(whichCol)) stop(paste("Class", class, "not found."))
-        imp <- imp[, whichCol, drop=FALSE]
-      }
-    }
-  }
-  imp
-}
-
-
-
-getSplitImproveCompact <- function(fit, bins) {
-  #   Return a data-frame: var name, rsq, split value, improvement
-  #   Compact the splits into bins defined by bins matrix
-  #   The i'th bin for predictor p is the interval (bin[i,p],bin[i+1,p])
-  #   Every predictor is split into the same number of bins (nrow(bins)-1)
-
-  #   extract all trees to a matrix and select for splits with some improvement
-  trees <- lapply(1:fit$ntree, function(k) try(getTree(fit, k),silent=TRUE)) #Nick Ellis 10/12/2009
-  ok <- sapply(trees, class) != "try-error"
-  tmp <- do.call("rbind", lapply((1:fit$ntree)[ok], function(k) cbind(tree = k, trees[[k]])))
-  tmp <- tmp[tmp[,"status"]==-3 & zapsmall(tmp[,"improve"]) > 0,c("split var","split point","improve")]
-  colnames(tmp) <- c("var_n","split","improve")
-  rownames(tmp) <- NULL
-
-  #   assign the split to the appropriate bin and aggregate importance in each bin
-  Xnames <- colnames(bins)
-  tmp <- data.frame(var=Xnames[tmp[,"var_n"]], tmp, bin=rep(0,nrow(tmp)))
-  for(p in Xnames) {
-    sub <- with(tmp,var==p)
-    tmp$bin[sub] <- as.numeric(cut(tmp$split[sub], bins[,p], include=TRUE, ordered=TRUE))
-  }
-  tmp <- with(tmp[tmp$bin>0,],agg.sum(improve,list(var,bin),sort.it=TRUE))
-  names(tmp) <- c("var","bin","improve")
-
-  #   Set the split value to the bin centre, but retain the bin number in case
-  #   the bin centre is not appropriate value
-  tmp <- cbind(tmp,split=rep(NA,nrow(tmp)),rsq=fit$rsq[fit$ntree])
-  midpoints <- function(x) 0.5*(x[-1]+x[-length(x)]) # points between equally spaced points
-  for(p in Xnames) {
-    sub <- with(tmp,var==p)
-    tmp$split[sub] <- midpoints(bins[,p])[tmp$bin[sub]]
-  }
-  tmp[,c("var","rsq","split","improve","bin")]
-}
-
-
-getSplitImprove <-function(fit, X) {
-  #   return a data-frame: var name, rsq, var number, split value, improvement
-  trees <- lapply(1:fit$ntree, function(k) try(getTree(fit, k),silent=TRUE)) #Nick Ellis 10/12/2009
-  ok <- sapply(trees, class) != "try-error"
-  tmp <- do.call("rbind", lapply((1:fit$ntree)[ok], function(k) cbind(tree = k, trees[[k]])))
-  tmp <- tmp[tmp[,"status"]==-3 & zapsmall(tmp[,"improve"]) > 0,c("split var","split point","improve")]
-  colnames(tmp) <- c("var_n","split","improve")
-  rownames(tmp)<-NULL     #S.J. Smith 11/05/2009
-  res <- cbind(data.frame(var=names(X)[tmp[,"var_n"]],rsq=rep(fit$rsq[fit$ntree],nrow(tmp))),tmp)
-  ok <- zapsmall(res[,"improve"]) > 0
-  res[ok,]
-}
-
-
-getSplitImproveClassCompact <- function(fit, bins, err0) {
-  #   Return a data-frame: var name, rsq, split value, improvement
-  #   Compact the splits into bins defined by bins matrix
-  #   The i'th bin for predictor p is the interval (bin[i,p],bin[i+1,p])
-  #   Every predictor is split into the same number of bins (nrow(bins)-1)
-
-  #   extract all trees to a matrix and select for splits with some improvement
-  trees <- lapply(1:fit$ntree, function(k) try(getTree(fit, k),silent=TRUE)) #Nick Ellis 10/12/2009
-  ok <- sapply(trees, class) != "try-error"
-  tmp <- do.call("rbind", lapply((1:fit$ntree)[ok], function(k) cbind(tree = k, trees[[k]])))
-  tmp <- tmp[tmp[,"status"]== 1 & zapsmall(tmp[,"improve"]) > 0,c("split var","split point","improve")]
-  colnames(tmp) <- c("var_n","split","improve")
-  rownames(tmp) <- NULL
-
-  #   assign the split to the appropriate bin and aggregate importance in each bin
-  Xnames <- colnames(bins)
-  tmp <- data.frame(var=Xnames[tmp[,"var_n"]], tmp, bin=rep(0,nrow(tmp)))
-  for(p in Xnames) {
-    sub <- with(tmp,var==p)
-    tmp$bin[sub] <- as.numeric(cut(tmp$split[sub], bins[,p], include=TRUE, ordered=TRUE))
-  }
-  tmp <- with(tmp[tmp$bin>0,],agg.sum(improve,list(var,bin),sort.it=TRUE))
-  names(tmp) <- c("var","bin","improve")
-
-  #   Set the split value to the bin centre, but retain the bin number in case
-  #   the bin centre is not appropriate value
-  tmp <- cbind(tmp,split=rep(NA,nrow(tmp)),rsq=rep((err0-fit$err.rate[fit$ntree, "OOB"])/err0, nrow(tmp)))
-  for(p in Xnames) {
-    sub <- with(tmp,var==p)
-    tmp$split[sub] <- midpoints(bins[,p])[tmp$bin[sub]]
-  }
-  tmp[,c("var","rsq","split","improve","bin")]
-}
-
-getSplitImproveClass <-
-  function(fit, X, err0)
-  {
-    #   return a data-frame: var name, rsq, var number, split value, improvement
-    trees <- lapply(1:fit$ntree, function(k) try(getTree(fit, k),silent=TRUE)) #Nick Ellis 10/12/2009
-    ok <- sapply(trees, class) != "try-error"
-    tmp <- do.call("rbind", lapply((1:fit$ntree)[ok], function(k) cbind(tree = k, trees[[k]])))
-    tmp <- tmp[tmp[,"status"]==1,c("split var","split point","improve")]
-    dimnames(tmp) <- list(NULL,c("var_n","split","improve"))
-    res<-cbind(data.frame(var=names(X)[tmp[,"var_n"]],rsq=rep((err0-fit$err.rate[fit$ntree,"OOB"])/err0,nrow(tmp))),tmp)
-    res
-}
-
-
-Impurity.based.measures <-function(obj)
-{
-  #becomes an internal function not usually used by users
-  #Modified 07/10/2009 by SJS re: NE changes for classification trees.
-  dens <- lapply(names(obj$X), function(i) density(na.omit(obj$X[,i]),from=min(na.omit(obj$X[,i])),to=max(na.omit(obj$X[,i]))))
-  dens <- lapply(dens,whiten,lambda=0.90) # hard-coded whitening
-  names(dens) <- names(obj$X)
-  res <- do.call("rbind", lapply(names(obj$result), function(spec) cbind(spec=spec,obj$result[[spec]]))) #added by Smith 13/05/2009
-  res$improve <- pmax(0,res$improve)
-  res$rsq <- pmax(0,res$rsq)   #added by Ellis 12/05/2009
-  res$improve.tot <- tapply(res$improve,res$spec,sum)[res$spec]
-  res$improve.tot.var <- tapply(res$improve,interaction(res$spec,res$var),sum)[interaction(res$spec,res$var)]
-  res$improve.norm <- with(res,improve/improve.tot*rsq)
-  nodup <- !duplicated(res[,1:2])
-  res.u <- res[nodup, c("spec","var","rsq","improve.tot","improve.tot.var")]
-  res.u$rsq <- with(res.u, ifelse(is.na(rsq), 0, rsq))
-  res.u$rsq.var <- with(res.u,rsq*improve.tot.var/improve.tot)
-  list(res=res,res.u=res.u,dens=dens)
-}
-
-
-cumimp <- function (x, ...)
-  UseMethod("cumimp")
-
-cumimp.gradientForest <- function (x, predictor, type=c("Overall","Species")[1], standardize=TRUE, standardize_after=FALSE, ...)
-  {
-    if (!inherits(x,"gradientForest"))
-      stop(paste("'x' must be a gradientForest object"))
-    if (length(predictor) != 1)
-      stop(paste("'predictor' must be a single string"))
-    if (!is.element(predictor,levels(x$res$var)))
-      stop(paste("Predictor",predictor,"does not belong to gradientForest object"))
-    if (is.na(option <- pmatch(type,c("Overall","Species"))))
-      stop(paste('Unmatched type "',type,'". Expecting one of "Overall" or "Species"',sep=''))
-
-    # convert density to its inverse
-    inverse <- function(dens) {dens$y <- 1/dens$y; dens}
-
-    # crude integral
-    crude.integrate <- function(f) sum(f$y)*diff(f$x)[1]
-
-    # normalize f(x) to f(x)/fbar
-    normalize <- function(f) {
-      integral <- try(integrate(approxfun(f,rule=2),lower=min(f$x),upper=max(f$x))$value)
-      if (class(integral)=="try-error") integral <- crude.integrate(f)
-      f$y <- f$y/integral*diff(range(f$x));
-      f
-    }
-
-    getCU <- function(importance.df, Rsq) {
-      if (nrow(importance.df) == 0) {
-        return( list(x=0, y=0))
-      }
-      agg <- with(importance.df, agg.sum(improve.norm, list(split), sort.it=TRUE))
-      cum.split <- agg[,1]
-      height <- agg[,2]
-      if (standardize & standardize_after) # crucial to normalize this case
-        dinv <- normalize(inverse(x$dens[[predictor]]))
-      else dinv <- inverse(x$dens[[predictor]]) #
-      dinv.vals <- approx(dinv$x, dinv$y, cum.split, rule=2)$y
-      if (any(bad <- is.na(height))) {
-        cum.split <- cum.split[!bad]
-        height <- height[!bad]
-        dinv.vals <- dinv.vals[!bad]
-      }
-      if (standardize & !standardize_after) height <- height * dinv.vals
-      height <- height/sum(height)*Rsq
-      if (standardize & standardize_after) height <- height * dinv.vals
-      res <- list(x=cum.split, y=cumsum(height))
-    }
-
-    importance.df <- x$res[x$res$var==predictor,]
-    if (option==1) {
-      res <- getCU(importance.df, importance(x, "Weighted")[predictor])
-    } else {
-      species <- names(x$result)
-      res <- lapply(namenames(species), function(sp)
-        getCU(subset(importance.df, spec==sp), x$imp.rsq[predictor,sp]))
-    }
-    res
-  }
-
-cumimp.combinedGradientForest <-
-  function (x, predictor, weight=c("uniform","species","rsq.total","rsq.mean")[3], gear, ...)
-  {
-    if (!inherits(x,"combinedGradientForest"))
-      stop(paste("'x' must be a gradientForest object"))
-    if (length(predictor) != 1)
-      stop(paste("'predictor' must be a single string"))
-    if (!is.element(predictor,names(x$X)[-1]))
-      stop(paste("Predictor",predictor,"does not belong to combinedGradientForest object"))
-    if (is.na(option <- pmatch(weight,c("uniform","species","rsq.total","rsq.mean"))))
-      stop(paste('Unmatched weight "',weight,'". Expecting one of "uniform", "species", "rsq.total" or "rsq.mean"',sep=""))
-
-    if (missing(gear)) {
-      res <- x$CU[[predictor]][[paste("combined",weight,sep=".")]]
-    } else {
-      res <- x$CU[[predictor]][[gear]]
-    }
-    res
-  }
-
-
-
-#randomForest <- function (x, ...) {
-#  UseMethod("randomForest")
-#}
 
 
 randomForest.formula <-
