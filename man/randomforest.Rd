@@ -6,6 +6,9 @@
 \usage{
 randomforest(x, ...)
 }
+\arguments{
+\item{x}{data}
+}
 \description{
 random Forest
 }

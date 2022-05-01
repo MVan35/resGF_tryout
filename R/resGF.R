@@ -1205,7 +1205,7 @@ cumimp.combinedGradientForest <-
 
 
 #' random Forest
-#' @param x
+#' @param x data
 #' @export
 randomforest <- function (x, ...) {
   UseMethod("randomforest")
