@@ -385,11 +385,11 @@ gradientForest <- function (data, predictor.vars, response.vars, ntree = 10, mtr
   imp <- matrix(0, 0, 2, dimnames = list(NULL, c("%IncMSE",
                                                  "IncNodePurity")))
   if (is.null(mtry))
-    fitcmd <- quote(myrandomForest(Species ~ rhs, data = cbind(Y,
+    fitcmd <- quote(randomforest(Species ~ rhs, data = cbind(Y,
                                                              X), maxLevel = maxLevel, keep.forest = TRUE, importance = TRUE,
                                  ntree = ntree, keep.group = TRUE, keep.inbag = TRUE,
                                  corr.threshold = corr.threshold, na.action = na.omit))
-  else fitcmd <- quote(myrandomForest(Species ~ rhs, data = cbind(Y,
+  else fitcmd <- quote(randomforest(Species ~ rhs, data = cbind(Y,
                                                                 X), maxLevel = maxLevel, keep.forest = TRUE, importance = TRUE,
                                     ntree = ntree, mtry = mtry, keep.group = TRUE, keep.inbag = TRUE,
                                     corr.threshold = corr.threshold, na.action = na.omit))
@@ -524,7 +524,7 @@ gradientForest <- function (data, predictor.vars, response.vars, ntree = 10, mtr
 #' f1 <- gradientForest(data.frame(Ysimulation,Xsimulation), preds, specs, ntree=10)
 #' f1
 #' @export
-randomForest.default <- function (x, y = NULL, xtest = NULL, ytest = NULL, ntree = 500,
+randomforest.default <- function (x, y = NULL, xtest = NULL, ytest = NULL, ntree = 500,
                           mtry = if (!is.null(y) && !is.factor(y)) max(floor(ncol(x)/3),
                                                                        1) else floor(sqrt(ncol(x))), replace = TRUE, classwt = NULL,
                           cutoff, strata, sampsize = if (replace) nrow(x) else ceiling(0.632 *
@@ -1203,12 +1203,12 @@ cumimp.combinedGradientForest <-
     res
   }
 
-myrandomforest <- function (x, ...) {
-  UseMethod("myrandomforest")
+randomforest <- function (x, ...) {
+  UseMethod("randomforest")
 }
 
 
-randomForest.formula <-
+randomforest.formula <-
   function(formula, data = NULL, ..., subset, na.action = na.fail) {
     ### formula interface for randomForest.
     ### code gratefully stolen from svm.formula (package e1071).
