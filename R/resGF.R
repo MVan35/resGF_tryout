@@ -1129,32 +1129,18 @@ randomForest.default <- function (x, y = NULL, xtest = NULL, ytest = NULL, ntree
                                                                                                                                                                                                                             x.col.names)) else NULL)
   }
   else {
-    rfout <- .C("regRF", x, as.double(y), as.integer(c(n,
-                                                       p)), as.integer(sampsize), as.integer(nodesize),
+    rfout <- .C("regRF", x, as.double(y), as.integer(c(n, p)), as.integer(sampsize), as.integer(nodesize),
                 as.integer(nrnodes), as.integer(ntree), as.integer(mtry),
                 as.integer(c(importance, localImp, nPerm)), as.integer(ncat),
                 as.integer(maxcat), as.integer(do.trace), as.integer(proximity),
                 as.integer(oob.prox), as.integer(corr.bias), ypred = double(n),
                 impout = impout, impmat = impmat, impSD = impSD,
-                prox = prox, ndbigtree = integer(ntree), nodestatus = matrix(integer(nrnodes *
-                                                                                       nt), ncol = nt), leftDaughter = matrix(integer(nrnodes *
-                                                                                                                                        nt), ncol = nt), rightDaughter = matrix(integer(nrnodes *
-                                                                                                                                                                                          nt), ncol = nt), nodepred = matrix(double(nrnodes *
-                                                                                                                                                                                                                                      nt), ncol = nt), bestvar = matrix(integer(nrnodes *
-                                                                                                                                                                                                                                                                                  nt), ncol = nt), xbestsplit = matrix(double(nrnodes *
-                                                                                                                                                                                                                                                                                                                                nt), ncol = nt), mse = double(ntree), keep = as.integer(c(keep.forest,
+                prox = prox, ndbigtree = integer(ntree), nodestatus = matrix(integer(nrnodes * nt), ncol = nt), leftDaughter = matrix(integer(nrnodes * nt), ncol = nt), rightDaughter = matrix(integer(nrnodes *  nt), ncol = nt), nodepred = matrix(double(nrnodes *  nt), ncol = nt), bestvar = matrix(integer(nrnodes *  nt), ncol = nt), xbestsplit = matrix(double(nrnodes * nt), ncol = nt), mse = double(ntree), keep = as.integer(c(keep.forest,
                                                                                                                                                                                                                                                                                                                                                                                           keep.inbag, keep.group)), replace = as.integer(replace),
                 testdat = as.integer(testdat), xts = xtest, ntest = as.integer(ntest),
                 yts = as.double(ytest), labelts = as.integer(labelts),
                 ytestpred = double(ntest), proxts = proxts, msets = double(if (labelts) ntree else 1),
-                coef = double(2), oob.times = integer(n), inbag = if (keep.inbag) matrix(integer(n *
-                                                                                                   ntree), n) else integer(1), nodeSS = matrix(double(nrnodes *
-                                                                                                                                                        nt), ncol = nt), nodeImprove = matrix(double(nrnodes *
-                                                                                                                                                                                                       nt), ncol = nt), as.integer(maxLevel), group = if (keep.group) matrix(integer(n *
-                                                                                                                                                                                                                                                                                       p), n) else integer(1), permX = if (keep.group) matrix(double(n *
-                                                                                                                                                                                                                                                                                                                                                       p), n) else double(1), as.integer(abs(corr) >
-                                                                                                                                                                                                                                                                                                                                                                                           corr.threshold), DUP = FALSE, PACKAGE = "extendedForest")[c(16:28,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                       36:43, 45:46)]
+                coef = double(2), oob.times = integer(n), inbag = if (keep.inbag) matrix(integer(n *   ntree), n) else integer(1), nodeSS = matrix(double(nrnodes *  nt), ncol = nt), nodeImprove = matrix(double(nrnodes * nt), ncol = nt), as.integer(maxLevel), group = if (keep.group) matrix(integer(n *   p), n) else integer(1), permX = if (keep.group) matrix(double(n * p), n) else double(1), as.integer(abs(corr) > corr.threshold), DUP = FALSE, PACKAGE = "extendedForest")[c(16:28, 36:43, 45:46)]
     if (keep.forest) {
       max.nodes <- max(rfout$ndbigtree)
       rfout$nodestatus <- rfout$nodestatus[1:max.nodes,
@@ -1252,5 +1238,921 @@ randomForest.formula <-
     class(ret) <- c("randomForest.formula", "randomForest")
     return(ret)
   }
+
+
+rfImpute <- function(x, ...)
+  UseMethod("rfImpute")
+
+rfImpute.formula <- function(x, data, ..., subset) {
+  if (!inherits(x, "formula"))
+    stop("method is only for formula objects")
+  call <- match.call()
+  m <- match.call(expand.dots = FALSE)
+  names(m)[2] <- "formula"
+  if (is.matrix(eval(m$data, parent.frame())))
+    m$data <- as.data.frame(data)
+  m$... <- NULL
+  m$na.action <- as.name("na.pass")
+  m[[1]] <- as.name("model.frame")
+  m <- eval(m, parent.frame())
+  Terms <- attr(m, "terms")
+  attr(Terms, "intercept") <- 0
+  y <- model.response(m)
+  if (!is.null(y)) m <- m[,-1]
+  for (i in seq(along=ncol(m))) {
+    if(is.ordered(m[[i]])) m[[i]] <- as.numeric(m[[i]])
+  }
+  ret <- rfImpute.default(m, y, ...)
+  names(ret)[1] <- deparse(as.list(x)[[2]])
+  ret
+}
+
+rfImpute.default <- function(x, y, iter=5, ntree=300, ...) {
+  if (any(is.na(y))) stop("Can't have NAs in", deparse(substitute(y)))
+  if (!any(is.na(x))) stop("No NAs found in ", deparse(substitute(x)))
+  xf <- na.roughfix(x)
+  hasNA <- which(apply(x, 2, function(x) any(is.na(x))))
+  if (is.data.frame(x)) {
+    isfac <- sapply(x, is.factor)
+  } else {
+    isfac <- rep(FALSE, ncol(x))
+  }
+
+  for (i in 1:iter) {
+    prox <- randomForest(xf, y, ntree=ntree, ..., do.trace=ntree,
+                         proximity=TRUE)$proximity
+    for (j in hasNA) {
+      miss <- which(is.na(x[, j]))
+      if (isfac[j]) {
+        lvl <- levels(x[[j]])
+        catprox <- apply(prox[-miss, miss, drop=FALSE], 2,
+                         function(v) lvl[which.max(tapply(v, x[[j]][-miss], mean))])
+        xf[miss, j] <- catprox
+      } else {
+        sumprox <- colSums(prox[-miss, miss, drop=FALSE])
+        xf[miss, j] <- (prox[miss, -miss, drop=FALSE] %*% xf[,j][-miss]) / sumprox
+      }
+      NULL
+    }
+  }
+  xf <- cbind(y, xf)
+  names(xf)[1] <- deparse(substitute(y))
+  xf
+}
+
+
+classCenter <- function(x, label, prox, nNbr = min(table(label))-1) {
+  ## nPrototype=rep(3, length(unique(label))), ...) {
+  label <- as.character(label)
+  clsLabel <- unique(label)
+  ## Find the nearest nNbr neighbors of each case
+  ## (including the case itself).
+  idx <- t(apply(prox, 1, order, decreasing=TRUE)[1:nNbr,])
+  ## Find the class labels of the neighbors.
+  cls <- label[idx]
+  dim(cls) <- dim(idx)
+  ## Count the number of neighbors in each class for each case.
+  ncls <- sapply(clsLabel, function(x) rowSums(cls == x))
+  ## For each class, find the case(s) with most neighbors in that class.
+  clsMode <- max.col(t(ncls))
+  ## Identify the neighbors of the class modes that are of the target class.
+  nbrList <- mapply(function(cls, m) idx[m,][label[idx[m,]] == cls],
+                    clsLabel, clsMode, SIMPLIFY=FALSE)
+  ## Get the X data for the neighbors of the class `modes'.
+  xdat <- t(sapply(nbrList, function(i) apply(x[i,,drop=FALSE], 2,
+                                              median)))
+  xdat
+}
+
+MDSplot <- function(rf, fac, k=2, palette=NULL, pch=20, ...) {
+  if (!inherits(rf, "randomForest"))
+    stop(deparse(substitute(rf)), " must be a randomForest object")
+  if(is.null(rf$proximity))
+    stop(deparse(substitute(rf)), " does not contain a proximity matrix")
+  op <- par(pty="s")
+  on.exit(par(op))
+  rf.mds <- stats:::cmdscale(1 - rf$proximity, eig=TRUE, k=k)
+  colnames(rf.mds$points) <- paste("Dim", 1:k)
+  nlevs <- nlevels(fac)
+  if (is.null(palette)) {
+    palette <- if (require(RColorBrewer) && nlevs < 12)
+      brewer.pal(nlevs, "Set1") else rainbow(nlevs)
+  }
+  if (k <= 2) {
+    plot(rf.mds$points, col=palette[as.numeric(fac)], pch=pch, ...)
+  } else {
+    pairs(rf.mds$points, col=palette[as.numeric(fac)], pch=pch, ...)
+  }
+  invisible(rf.mds)
+}
+
+
+combine <- function(...) {
+  pad0 <- function(x, len) c(x, rep(0, len-length(x)))
+  padm0 <- function(x, len) rbind(x, matrix(0, nrow=len-nrow(x),
+                                            ncol=ncol(x)))
+  rflist <- list(...)
+  areForest <- sapply(rflist, function(x) inherits(x, "randomForest"))
+  if (any(!areForest)) stop("Argument must be a list of randomForest objects")
+  ## Use the first component as a template
+  rf <- rflist[[1]]
+  classRF <- rf$type == "classification"
+  trees <- sapply(rflist, function(x) x$ntree)
+  ntree <- sum(trees)
+  rf$ntree <- ntree
+  nforest <- length(rflist)
+  haveTest <- ! any(sapply(rflist, function(x) is.null(x$test)))
+  ## Check if predictor variables are identical.
+  vlist <- lapply(rflist, function(x) rownames(importance(x)))
+  numvars <- sapply(vlist, length)
+  if (! all(numvars[1] == numvars[-1]))
+    stop("Unequal number of predictor variables in the randomForest objects.")
+  for (i in seq_along(vlist)) {
+    if (! all(vlist[[i]] == vlist[[1]]))
+      stop("Predictor variables are different in the randomForest objects.")
+  }
+  ## Combine the forest component, if any
+  haveForest <- sapply(rflist, function(x) !is.null(x$forest))
+  if (all(haveForest)) {
+    nrnodes <- max(sapply(rflist, function(x) x$forest$nrnodes))
+    rf$forest$nrnodes <- nrnodes
+    rf$forest$ndbigtree <-
+      unlist(sapply(rflist, function(x) x$forest$ndbigtree))
+    rf$forest$nodestatus <-
+      do.call("cbind", lapply(rflist, function(x)
+        padm0(x$forest$nodestatus, nrnodes)))
+    rf$forest $bestvar <-
+      do.call("cbind",
+              lapply(rflist, function(x)
+                padm0(x$forest$bestvar, nrnodes)))
+    rf$forest$xbestsplit <-
+      do.call("cbind",
+              lapply(rflist, function(x)
+                padm0(x$forest$xbestsplit, nrnodes)))
+    rf$forest$nodepred <-
+      do.call("cbind", lapply(rflist, function(x)
+        padm0(x$forest$nodepred, nrnodes)))
+    tree.dim <- dim(rf$forest$treemap)
+    if (classRF) {
+      rf$forest$treemap <-
+        array(unlist(lapply(rflist, function(x) apply(x$forest$treemap, 2:3,
+                                                      pad0, nrnodes))),
+              c(nrnodes, 2, ntree))
+    } else {
+      rf$forest$leftDaughter <-
+        do.call("cbind",
+                lapply(rflist, function(x)
+                  padm0(x$forest$leftDaughter, nrnodes)))
+      rf$forest$rightDaughter <-
+        do.call("cbind",
+                lapply(rflist, function(x)
+                  padm0(x$forest$rightDaughter, nrnodes)))
+    }
+    rf$forest$ntree <- ntree
+    if (classRF) rf$forest$cutoff <- rflist[[1]]$forest$cutoff
+  } else {
+    rf$forest <- NULL
+  }
+
+  if (classRF) {
+    ## Combine the votes matrix:
+    rf$votes <- 0
+    rf$oob.times <- 0
+    areVotes <- all(sapply(rflist, function(x) any(x$votes > 1, na.rf=TRUE)))
+    if (areVotes) {
+      for(i in 1:nforest) {
+        rf$oob.times <- rf$oob.times + rflist[[i]]$oob.times
+        rf$votes <- rf$votes +
+          ifelse(is.na(rflist[[i]]$votes), 0, rflist[[i]]$votes)
+      }
+    } else {
+      for(i in 1:nforest) {
+        rf$oob.times <- rf$oob.times + rflist[[i]]$oob.times
+        rf$votes <- rf$votes +
+          ifelse(is.na(rflist[[i]]$votes), 0, rflist[[i]]$votes) *
+          rflist[[i]]$oob.times
+      }
+      rf$votes <- rf$votes / rf$oob.times
+    }
+    rf$predicted <- factor(colnames(rf$votes)[max.col(rf$votes)],
+                           levels=levels(rf$predicted))
+    if(haveTest) {
+      rf$test$votes <- 0
+      if (any(rf$test$votes > 1)) {
+        for(i in 1:nforest)
+          rf$test$votes <- rf$test$votes + rflist[[i]]$test$votes
+      } else {
+        for (i in 1:nforest)
+          rf$test$votes <- rf$test$votes +
+            rflist[[i]]$test$votes * rflist[[i]]$ntree
+      }
+      rf$test$predicted <-
+        factor(colnames(rf$test$votes)[max.col(rf$test$votes)],
+               levels=levels(rf$test$predicted))
+    }
+  } else {
+    rf$predicted <- 0
+    for (i in 1:nforest) rf$predicted <- rf$predicted +
+        rflist[[i]]$predicted * rflist[[i]]$ntree
+    rf$predicted <- rf$predicted / ntree
+    if (haveTest) {
+      rf$test$predicted <- 0
+      for (i in 1:nforest) rf$test$predicted <- rf$test$predicted +
+          rflist[[i]]$test$predicted * rflist[[i]]$ntree
+      rf$test$predicted <- rf$test$predicted / ntree
+    }
+  }
+
+  ## If variable importance is in all of them, compute the average
+  ## (weighted by the number of trees in each forest)
+  have.imp <- !any(sapply(rflist, function(x) is.null(x$importance)))
+  if (have.imp) {
+    rf$importance <- rf$importanceSD <- 0
+    for(i in 1:nforest) {
+      rf$importance <- rf$importance +
+        rflist[[i]]$importance * rflist[[i]]$ntree
+      ## Do the same thing with SD of importance, though that's not
+      ## exactly right...
+      rf$importanceSD <- rf$importanceSD +
+        rflist[[i]]$importanceSD^2 * rflist[[i]]$ntree
+    }
+    rf$importance <- rf$importance / ntree
+    rf$importanceSD <- sqrt(rf$importanceSD / ntree)
+    haveCaseImp <- !any(sapply(rflist, function(x)
+      is.null(x$localImportance)))
+    ## Average casewise importance
+    if (haveCaseImp) {
+      rf$localImportance <- 0
+      for (i in 1:nforest) {
+        rf$localImportance <- rf$localImportance +
+          rflist[[i]]$localImportance * rflist[[i]]$ntree
+      }
+      rf$localImportance <- rf$localImportance / ntree
+    }
+  }
+
+  ## If proximity is in all of them, compute the average
+  ## (weighted by the number of trees in each forest)
+  have.prox <- !any(sapply(rflist, function(x) is.null(x$proximity)))
+  if(have.prox) {
+    rf$proximity <- 0
+    for(i in 1:nforest)
+      rf$proximity <- rf$proximity + rflist[[i]]$proximity * rflist[[i]]$ntree
+    rf$proximity <- rf$proximity / ntree
+  }
+
+  ## Set confusion matrix and error rates to NULL
+  if(classRF) {
+    rf$confusion <- NULL
+    rf$err.rate <- NULL
+    if(haveTest) {
+      rf$test$confusion <- NULL
+      rf$err.rate <- NULL
+    }
+  } else {
+    rf$mse <- rf$rsq <- NULL
+    if(haveTest) rf$test$mse <- rf$test$rsq <- NULL
+  }
+  rf
+}
+
+getTree <- function(rfobj, k=1, labelVar=FALSE) {
+  if (is.null(rfobj$forest)) {
+    stop("No forest component in ", deparse(substitute(rfobj)))
+  }
+  if (k > rfobj$ntree) {
+    stop("There are fewer than ", k, "trees in the forest")
+  }
+  if (rfobj$type == "regression") {
+    tree <- cbind(rfobj$forest$leftDaughter[,k],
+                  rfobj$forest$rightDaughter[,k],
+                  rfobj$forest$bestvar[,k],
+                  rfobj$forest$xbestsplit[,k],
+                  rfobj$forest$nodestatus[,k],
+                  rfobj$forest$nodepred[,k],
+                  rfobj$forest$nodeSS[,k],
+                  rfobj$forest$nodeImprove[,k])[1:rfobj$forest$ndbigtree[k],,drop=F]
+    dimnames(tree) <- list(1:nrow(tree), c("left daughter", "right daughter",
+                                           "split var", "split point", "status",
+                                           "prediction", "SS", "improve"))
+  } else {
+    tree <- cbind(rfobj$forest$treemap[,,k],
+                  rfobj$forest$rightDaughter[,k],
+                  rfobj$forest$bestvar[,k],
+                  rfobj$forest$xbestsplit[,k],
+                  rfobj$forest$nodestatus[,k],
+                  rfobj$forest$nodepred[,k],
+                  rfobj$forest$nodeImprove[,k])[1:rfobj$forest$ndbigtree[k],,drop=F]
+    dimnames(tree) <- list(1:nrow(tree), c("left daughter", "right daughter",
+                                           "split var", "split point", "status",
+                                           "prediction", "improve"))
+  }
+
+
+  if (labelVar) {
+    tree <- as.data.frame(tree)
+    v <- tree[[3]]
+    v[v == 0] <- NA
+    tree[[3]] <- factor(rownames(rfobj$importance)[v])
+    if (rfobj$type == "classification") {
+      v <- tree[[6]]
+      v[! v %in% 1:nlevels(rfobj$y)] <- NA
+      tree[[6]] <- levels(rfobj$y)[v]
+    }
+  }
+  tree
+}
+
+grow <- function(x, ...) UseMethod("grow")
+
+grow.default <- function(x, ...)
+  stop("grow has not been implemented for this class of object")
+
+grow.randomForest <- function(x, how.many, ...) {
+  y <- update(x, ntree=how.many)
+  combine(x, y)
+}
+
+
+margin <- function(rf, observed) {
+  if( !inherits(rf, "randomForest") ) {
+    stop("margin defined for Random Forests")
+  }
+  if( is.null(rf$votes) ) {
+    stop("margin is only defined if votes are present")
+  }
+  if( !is.factor(observed) ) {
+    stop(deparse(substitute(observed)), " is not a factor")
+  }
+  augD <- rf$votes
+  if( any(augD > 1) ) {
+    augD <- sweep(augD, 1, rowSums(augD), "/")
+  }
+  augD <- data.frame(augD, observed)
+  names(augD) <- c(dimnames(rf$votes)[[2]], "observed")
+  nlev <- length(levels(observed))
+
+  ans<- apply(augD, 1, function(x) { pos <- match(x[nlev+1], names(x));
+  t1 <- as.numeric(x[pos]);
+  t2 <- max(as.numeric(x[-c(pos, nlev+1)]));
+  t1 - t2 }
+  )
+  names(ans) <- observed
+  class(ans) <- "margin"
+  ans
+}
+
+plot.margin <- function(x, sort=TRUE, ...) {
+  if (sort) x <- sort(x)
+  nF <- factor(names(x))
+  nlevs <- length(levels(nF))
+  if ( require(RColorBrewer) && nlevs < 12) {
+    pal <- brewer.pal(nlevs,"Set1")
+  } else {
+    pal <- rainbow(nlevs)
+  }
+  plot.default(x, col=pal[as.numeric(nF)], pch=20, ... )
+}
+
+
+na.roughfix <- function(object, ...)
+  UseMethod("na.roughfix")
+
+na.roughfix.data.frame <- function(object, ...) {
+  ##  n <- length(object)
+  ##  vars <- seq(length = n)
+  isfac <- sapply(object, is.factor)
+  isnum <- sapply(object, is.numeric)
+  hasNA <- which(sapply(object, function(x) any(is.na(x))))
+  if (any(!(isfac | isnum)))
+    stop("na.roughfix only works for numeric or factor")
+  for (j in hasNA) {
+    if (isfac[j]) {
+      freq <- table(object[[j]])
+      xmode <- names(freq)[max.col(rbind(freq))]
+      object[[j]][is.na(object[[j]])] <- xmode
+    } else {
+      xmed <- median(object[[j]], na.rm=TRUE)
+      object[[j]][is.na(object[[j]])] <- xmed
+    }
+  }
+  object
+}
+
+na.roughfix.default <- function(object, ...) {
+  if (!is.atomic(object))
+    return(object)
+  d <- dim(object)
+  if (length(d) > 2)
+    stop("can't handle objects with more than two dimensions")
+  if (all(!is.na(object)))
+    return(object)
+  if (!is.numeric(object))
+    stop("roughfix can only deal with numeric data.")
+  if (length(d) == 2) {
+    hasNA <- which(apply(object, 2, function(x) any(is.na(x))))
+    for (j in hasNA)
+      object[is.na(object[, j]), j] <- median(object[, j], na.rm=TRUE)
+  } else {
+    object[is.na(object)] <- median(object, na.rm=TRUE)
+  }
+  object
+}
+
+
+outlier <- function(x, ...) UseMethod("outlier")
+
+outlier.randomForest <- function(x, ...) {
+  if (!inherits(x, "randomForest")) stop("x is not a randomForest object")
+  if (x$type == "regression") stop("no outlier measure for regression")
+  if (is.null(x$proximity)) stop("no proximity measures available")
+  outlier.default(x$proximity, x$y)
+}
+
+outlier.default <- function(x, cls=NULL, ...) {
+  if (nrow(x) != ncol(x)) stop ("x must be a square matrix")
+  n <- nrow(x)
+  if (is.null(cls)) cls <- rep(1, n)
+  cls <- factor(cls)
+  lvl <- levels(cls)
+  cls.n <- table(cls)[lvl]
+  id <- if (is.null(rownames(x))) 1:n else rownames(x)
+  outlier <- structure(rep(NA, n), names=id)
+  for (i in lvl) {
+    out <- rowSums(x[cls == i, cls == i]^2)
+    out <- n / ifelse(out == 0, 1, out)
+    out <- (out - median(out)) / mad(out)
+    outlier[names(out)] <- out
+  }
+  outlier
+}
+
+partialPlot <- function(x, ...) UseMethod("partialPlot")
+
+partialPlot.default <- function(x, ...)
+  stop("partial dependence plot not implemented for this class of objects.\n")
+
+partialPlot.randomForest <-
+  function (x, pred.data, x.var, which.class, w, plot=TRUE, add=FALSE,
+            n.pt = min(length(unique(pred.data[, xname])), 51), rug = TRUE,
+            xlab=deparse(substitute(x.var)), ylab="",
+            main=paste("Partial Dependence on", deparse(substitute(x.var))),
+            ...)
+  {
+    classRF <- x$type != "regression"
+    if (is.null(x$forest))
+      stop("The randomForest object must contain the forest.\n")
+    x.var <- substitute(x.var)
+    xname <- if (is.character(x.var)) x.var else {
+      if (is.name(x.var)) deparse(x.var) else {
+        eval(x.var)
+      }
+    }
+    xv <- pred.data[, xname]
+    n <- nrow(pred.data)
+    if (missing(w)) w <- rep(1, n)
+    if (classRF) {
+      if (missing(which.class)) {
+        focus <- 1
+      }
+      else {
+        focus <- charmatch(which.class, colnames(x$votes))
+        if (is.na(focus))
+          stop(which.class, "is not one of the class labels.")
+      }
+    }
+    if (is.factor(xv) && !is.ordered(xv)) {
+      x.pt <- levels(xv)
+      y.pt <- numeric(length(x.pt))
+      for (i in seq(along = x.pt)) {
+        x.data <- pred.data
+        x.data[, xname] <- factor(rep(x.pt[i], n), levels = x.pt)
+        if (classRF) {
+          pr <- predict(x, x.data, type = "prob")
+          y.pt[i] <- weighted.mean(log(ifelse(pr[, focus] > 0,
+                                              pr[, focus], 1)) -
+                                     rowMeans(log(ifelse(pr > 0, pr, 1))),
+                                   w, na.rm=TRUE)
+        } else y.pt[i] <- weighted.mean(predict(x, x.data), w, na.rm=TRUE)
+
+      }
+      if (add) {
+        points(1:length(x.pt), y.pt, type="h", lwd=2, ...)
+      } else {
+        if (plot) barplot(y.pt, width=rep(1, length(y.pt)), col="blue",
+                          xlab = xlab, ylab = ylab, main=main,
+                          names.arg=x.pt, ...)
+      }
+    } else {
+      if (is.ordered(xv))
+        xv <- as.numeric(xv)
+      x.pt <- seq(min(xv), max(xv), length = n.pt)
+      y.pt <- numeric(length(x.pt))
+      for (i in seq(along = x.pt)) {
+        x.data <- pred.data
+        x.data[, xname] <- rep(x.pt[i], n)
+        if (classRF) {
+          pr <- predict(x, x.data, type = "prob")
+          y.pt[i] <- weighted.mean(log(ifelse(pr[, focus] == 0, 1, pr[, focus]))
+                                   - rowMeans(log(ifelse(pr == 0, 1, pr))),
+                                   w, na.rm=TRUE)
+        } else {
+          y.pt[i] <- weighted.mean(predict(x, x.data), w, na.rm=TRUE)
+        }
+      }
+      if (add) {
+        lines(x.pt, y.pt, ...)
+      } else {
+        if (plot) plot(x.pt, y.pt, type = "l", xlab=xlab, ylab=ylab,
+                       main = main, ...)
+      }
+      if (rug && plot) {
+        if (n.pt > 10) {
+          rug(quantile(xv, seq(0.1, 0.9, by = 0.1)), side = 1)
+        } else {
+          rug(unique(xv, side = 1))
+        }
+      }
+    }
+    invisible(list(x = x.pt, y = y.pt))
+  }
+
+
+plot.randomForest <- function(x, type="l", main=deparse(substitute(x)), ...) {
+  if(x$type == "unsupervised")
+    stop("No plot for unsupervised randomForest.")
+  test <- !(is.null(x$test$mse) || is.null(x$test$err.rate))
+  if(x$type == "regression") {
+    err <- x$mse
+    if(test) err <- cbind(err, x$test$mse)
+  } else {
+    err <- x$err.rate
+    if(test) err <- cbind(err, x$test$err.rate)
+  }
+  if(test) {
+    colnames(err) <- c("OOB", "Test")
+    matplot(1:x$ntree, err, type = type, xlab="trees", ylab="Error",
+            main=main, ...)
+  } else {
+    matplot(1:x$ntree, err, type = type, xlab="trees", ylab="Error",
+            main=main, ...)
+  }
+  invisible(err)
+}
+
+predict.randomForest <-
+  function (object, newdata, type = "response", norm.votes = TRUE,
+            predict.all=FALSE, proximity = FALSE, nodes=FALSE, cutoff, ...)
+  {
+    if (!inherits(object, "randomForest"))
+      stop("object not of class randomForest")
+    if (is.null(object$forest)) stop("No forest component in the object")
+    out.type <- charmatch(tolower(type),
+                          c("response", "prob", "vote", "class"))
+    if (is.na(out.type))
+      stop("type must be one of 'response', 'prob', 'vote'")
+    if (out.type == 4) out.type <- 1
+    if (out.type != 1 && object$type == "regression")
+      stop("'prob' or 'vote' not meaningful for regression")
+    if (out.type == 2)
+      norm.votes <- TRUE
+    if (missing(newdata)) {
+      if (object$type == "regression") return(object$predicted)
+      if (proximity & is.null(object$proximity))
+        warning("cannot return proximity without new data if random forest object does not already have proximity")
+      if (out.type == 1) {
+        if (proximity) {
+          return(list(pred = object$predicted,
+                      proximity = object$proximity))
+        } else return(object$predicted)
+      }
+      if (norm.votes) {
+        t1 <- t(apply(object$votes, 1, function(x) { x/sum(x) }))
+        if(proximity) return(list(pred = t1, proximity = object$proximity))
+        else return(t1)
+      } else {
+        if (proximity) return(list(pred = object$votes, proximity = object$proximity))
+        else return(object$votes)
+      }
+    }
+    if (missing(cutoff)) {
+      cutoff <- object$forest$cutoff
+    } else {
+      if (sum(cutoff) > 1 || sum(cutoff) < 0 || !all(cutoff > 0) ||
+          length(cutoff) != length(object$classes)) {
+        stop("Incorrect cutoff specified.")
+      }
+      if (!is.null(names(cutoff))) {
+        if (!all(names(cutoff) %in% object$classes)) {
+          stop("Wrong name(s) for cutoff")
+        }
+        cutoff <- cutoff[object$classes]
+      }
+    }
+
+    if (object$type == "unsupervised")
+      stop("Can't predict unsupervised forest.")
+
+    if (inherits(object, "randomForest.formula")) {
+      newdata <- as.data.frame(newdata)
+      rn <- row.names(newdata)
+      Terms <- delete.response(object$terms)
+      x <- model.frame(Terms, newdata, na.action = na.omit)
+      keep <- match(row.names(x), rn)
+    } else {
+      if (is.null(dim(newdata)))
+        dim(newdata) <- c(1, length(newdata))
+      x <- newdata
+      if (nrow(x) == 0)
+        stop("newdata has 0 rows")
+      if (any(is.na(x)))
+        stop("missing values in newdata")
+      keep <- 1:nrow(x)
+      rn <- rownames(x)
+      if (is.null(rn)) rn <- keep
+    }
+    vname <- if (is.null(dim(object$importance))) {
+      names(object$importance)
+    } else {
+      rownames(object$importance)
+    }
+    if (is.null(colnames(x))) {
+      if (ncol(x) != length(vname)) {
+        stop("number of variables in newdata does not match that in the training data")
+      }
+    } else {
+      if (any(! vname %in% colnames(x)))
+        stop("variables in the training data missing in newdata")
+      x <- x[, vname, drop=FALSE]
+    }
+    if (is.data.frame(x)) {
+      xfactor <- which(sapply(x, is.factor))
+      if (length(xfactor) > 0 && "xlevels" %in% names(object$forest)) {
+        for (i in xfactor) {
+          if (any(! levels(x[[i]]) %in% object$forest$xlevels[[i]]))
+            stop("New factor levels not present in the training data")
+          x[[i]] <-
+            factor(x[[i]],
+                   levels=levels(x[[i]])[match(levels(x[[i]]), object$forest$xlevels[[i]])])
+        }
+      }
+      cat.new <- sapply(x, function(x) if (is.factor(x) && !is.ordered(x))
+        length(levels(x)) else 1)
+      if (!all(object$forest$ncat == cat.new))
+        stop("Type of predictors in new data do not match that of the training data.")
+    }
+    mdim <- ncol(x)
+    ntest <- nrow(x)
+    ntree <- object$forest$ntree
+    maxcat <- max(object$forest$ncat)
+    nclass <- object$forest$nclass
+    nrnodes <- object$forest$nrnodes
+    ## get rid of warning:
+    op <- options(warn=-1)
+    on.exit(options(op))
+    x <- t(data.matrix(x))
+
+    if (predict.all) {
+      treepred <- if (object$type == "regression") {
+        matrix(double(ntest * ntree), ncol=ntree)
+      } else {
+        matrix(integer(ntest * ntree), ncol=ntree)
+      }
+    } else {
+      treepred <- numeric(ntest)
+    }
+    proxmatrix <- if (proximity) matrix(0, ntest, ntest) else numeric(1)
+    nodexts <- if (nodes) integer(ntest * ntree) else integer(ntest)
+
+    if (object$type == "regression") {
+      if (!is.null(object$forest$treemap)) {
+        object$forest$leftDaughter <-
+          object$forest$treemap[,1,, drop=FALSE]
+        object$forest$rightDaughter <-
+          object$forest$treemap[,2,, drop=FALSE]
+        object$forest$treemap <- NULL
+      }
+
+      keepIndex <- "ypred"
+      if (predict.all) keepIndex <- c(keepIndex, "treepred")
+      if (proximity) keepIndex <- c(keepIndex, "proximity")
+      if (nodes) keepIndex <- c(keepIndex, "nodexts")
+      ans <- .C("regForest",
+                as.double(x),
+                ypred = double(ntest),
+                as.integer(mdim),
+                as.integer(ntest),
+                as.integer(ntree),
+                as.integer(object$forest$leftDaughter),
+                as.integer(object$forest$rightDaughter),
+                as.integer(object$forest$nodestatus),
+                as.integer(object$forest$nrnodes),
+                as.double(object$forest$xbestsplit),
+                as.double(object$forest$nodepred),
+                as.integer(object$forest$bestvar),
+                as.integer(object$forest$ndbigtree),
+                as.integer(object$forest$ncat),
+                as.integer(maxcat),
+                as.integer(predict.all),
+                treepred = as.double(treepred),
+                as.integer(proximity),
+                proximity = as.double(proxmatrix),
+                nodes = as.integer(nodes),
+                nodexts = as.integer(nodexts),
+                DUP=FALSE,
+                PACKAGE = "extendedForest")[keepIndex]
+      ## Apply bias correction if needed.
+      if (!is.null(object$coefs)) {
+        yhat <- object$coefs[1] + object$coefs[2] * ans$ypred
+      } else {
+        yhat <- ans$ypred
+      }
+      if (predict.all) {
+        treepred <- matrix(ans$treepred, length(keep),
+                           dimnames=list(rn[keep], NULL))
+      }
+      if (!proximity) {
+        res <- if (predict.all)
+          list(aggregate=yhat, individual=treepred) else yhat
+      } else {
+        res <- list(predicted = yhat,
+                    proximity = structure(ans$proximity,
+                                          dim=c(ntest, ntest), dimnames=list(rn, rn)))
+      }
+      if (nodes) {
+        attr(res, "nodes") <- matrix(ans$nodexts, ntest, ntree,
+                                     dimnames=list(rn[keep], 1:ntree))
+      }
+    } else {
+      countts <- matrix(0, ntest, nclass)
+      t1 <- .C("classForest",
+               mdim = as.integer(mdim),
+               ntest = as.integer(ntest),
+               nclass = as.integer(object$forest$nclass),
+               maxcat = as.integer(maxcat),
+               nrnodes = as.integer(nrnodes),
+               jbt = as.integer(ntree),
+               xts = as.double(x),
+               xbestsplit = as.double(object$forest$xbestsplit),
+               pid = as.double(object$forest$pid),
+               cutoff = as.double(cutoff),
+               countts = as.double(countts),
+               treemap = as.integer(aperm(object$forest$treemap,
+                                          c(2, 1, 3))),
+               nodestatus = as.integer(object$forest$nodestatus),
+               cat = as.integer(object$forest$ncat),
+               nodepred = as.integer(object$forest$nodepred),
+               treepred = as.integer(treepred),
+               jet = as.integer(numeric(ntest)),
+               bestvar = as.integer(object$forest$bestvar),
+               nodexts = nodexts,
+               ndbigtree = as.integer(object$forest$ndbigtree),
+               predict.all = as.integer(predict.all),
+               prox = as.integer(proximity),
+               proxmatrix = as.double(proxmatrix),
+               nodes = as.integer(nodes),
+               DUP=TRUE,
+               PACKAGE = "extendedForest")
+      if (out.type > 1) {
+        out.class.votes <- t(matrix(t1$countts, nrow = nclass, ncol = ntest))
+        if (norm.votes)
+          out.class.votes <-
+            sweep(out.class.votes, 1, rowSums(out.class.votes), "/")
+        z <- matrix(NA, length(rn), nclass,
+                    dimnames=list(rn, object$classes))
+        z[keep, ] <- out.class.votes
+        res <- z
+      } else {
+        out.class <- factor(rep(NA, length(rn)),
+                            levels=1:length(object$classes),
+                            labels=object$classes)
+        out.class[keep] <- object$classes[t1$jet]
+        names(out.class[keep]) <- rn[keep]
+        res <- out.class
+      }
+      if (predict.all) {
+        treepred <- matrix(object$classes[t1$treepred],
+                           nrow=length(keep), dimnames=list(rn[keep], NULL))
+        res <- list(aggregate=res, individual=treepred)
+      }
+      if (proximity)
+        res <- list(predicted = res, proximity = structure(t1$proxmatrix,
+                                                           dim = c(ntest, ntest),
+                                                           dimnames = list(rn[keep], rn[keep])))
+      if (nodes) attr(res, "nodes") <- matrix(t1$nodexts, ntest, ntree,
+                                              dimnames=list(rn[keep], 1:ntree))
+    }
+    res
+  }
+
+
+
+print.randomForest <-
+  function(x, ...) {
+    cat("\nCall:\n", deparse(x$call), "\n")
+    cat("               Type of random forest: ", x$type, "\n", sep="")
+    cat("                     Number of trees: ", x$ntree, "\n",sep="")
+    cat("No. of variables tried at each split: ", x$mtry, "\n\n", sep="")
+    if(x$type == "classification") {
+      if(!is.null(x$confusion)) {
+        cat("        OOB estimate of  error rate: ",
+            round(x$err.rate[x$ntree, "OOB"]*100, dig=2), "%\n", sep="")
+        cat("Confusion matrix:\n")
+        print(x$confusion)
+        if(!is.null(x$test$err.rate)) {
+          cat("                Test set error rate: ",
+              round(x$test$err.rate[x$ntree, "Test"]*100, dig=2), "%\n",
+              sep="")
+          cat("Confusion matrix:\n")
+          print(x$test$confusion)
+        }
+      }
+    }
+    if(x$type == "regression") {
+      if(!is.null(x$mse)) {
+        cat("          Mean of squared residuals: ", x$mse[length(x$mse)],
+            "\n", sep="")
+        cat("                    % Var explained: ",
+            round(100*x$rsq[length(x$rsq)], dig=2), "\n", sep="")
+        if(!is.null(x$test$mse)) {
+          cat("                       Test set MSE: ",
+              round(x$test$mse[length(x$test$mse)], dig=2), "\n", sep="")
+          cat("                    % Var explained: ",
+              round(100*x$test$rsq[length(x$test$rsq)], dig=2), "\n", sep="")
+        }
+      }
+      if (!is.null(x$coefs)) {
+        cat("  Bias correction applied:\n")
+        cat("  Intercept: ", x$coefs[1], "\n")
+        cat("      Slope: ", x$coefs[2], "\n")
+      }
+    }
+  }
+
+varImpPlot <- function(x, sort=TRUE,
+                       n.var=min(30, nrow(x$importance)),
+                       type=NULL, class=NULL, scale=TRUE,
+                       main=deparse(substitute(x)), ...) {
+  if (!inherits(x, "randomForest"))
+    stop("This function only works for objects of class `randomForest'")
+  imp <- importance(x, class=class, scale=scale, type=type, ...)
+  ## If there are more than two columns, just use the last two columns.
+  if (ncol(imp) > 2) imp <- imp[, -(1:(ncol(imp) - 2))]
+  nmeas <- ncol(imp)
+  if (nmeas > 1) {
+    op <- par(mfrow=c(1, 2), mar=c(4, 5, 4, 1), mgp=c(2, .8, 0),
+              oma=c(0, 0, 2, 0), no.readonly=TRUE)
+    on.exit(par(op))
+  }
+  for (i in 1:nmeas) {
+    ord <- if (sort) rev(order(imp[,i],
+                               decreasing=TRUE)[1:n.var]) else 1:n.var
+    xmin <- if (colnames(imp)[i] %in%
+                c("IncNodePurity", "MeanDecreaseGini")) 0 else min(imp[ord, i])
+    dotchart(imp[ord,i], xlab=colnames(imp)[i], ylab="",
+             main=if (nmeas == 1) main else NULL,
+             xlim=c(xmin, max(imp[,i])), ...)
+  }
+  if (nmeas > 1) mtext(outer=TRUE, side=3, text=main, cex=1.2)
+  invisible(imp)
+}
+
+
+varUsed <- function(x, by.tree=FALSE, count=TRUE) {
+  if (!inherits(x, "randomForest"))
+    stop(deparse(substitute(x)), "is not a randomForest object")
+  if (is.null(x$forest))
+    stop(deparse(substitute(x)), "does not contain forest")
+
+  p <- length(x$forest$ncat)  # Total number of variables.
+  if (count) {
+    if (by.tree) {
+      v <- apply(x$forest$bestvar, 2, function(x) {
+        xx <- numeric(p)
+        y <- table(x[x>0])
+        xx[as.numeric(names(y))] <- y
+        xx
+      })
+    } else {
+      v <- numeric(p)
+      vv <- table(x$forest$bestvar[x$forest$bestvar > 0])
+      v[as.numeric(names(vv))] <- vv
+    }
+  } else {
+    v <- apply(x$forest$bestvar, 2, function(x) sort(unique(x[x>0])))
+    if(!by.tree) v <- sort(unique(unlist(v)))
+  }
+  v
+}
+
+
+.onAttach <- function(libname, pkgname) {
+  RFver <- read.dcf(file=system.file("DESCRIPTION", package=pkgname),
+                    fields="Version")
+  message(paste(pkgname, RFver))
+  message("Type rfNews() to see new features/changes/bug fixes.")
+}
+
+
 
 
