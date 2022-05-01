@@ -751,6 +751,9 @@ cumimp.combinedGradientForest <-
 
 randomForest <- function (x, ...) UseMethod("randomForest")
 
+## mylevels() returns levels if given a factor, otherwise 0.
+mylevels <- function(x) if (is.factor(x)) levels(x) else 0
+
 #' randomForest: Classification and Regression with Random Forest
 #' randomForest implements Breiman's random forest algorithm (based on Breiman and Cutler's original Fortran code) for classification and regression.
 #' It can also be used in unsupervised mode for assessing proximities among data points.
