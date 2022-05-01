@@ -7,7 +7,7 @@ randomForest implements Breiman's random forest algorithm (based on Breiman and 
 It can also be used in unsupervised mode for assessing proximities among data points.
 #'}
 \usage{
-randomForest.default(
+\method{randomForest}{default}(
   x,
   y = NULL,
   xtest = NULL,

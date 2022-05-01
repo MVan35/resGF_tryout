@@ -748,6 +748,9 @@ cumimp.combinedGradientForest <-
   }
 
 
+
+randomForest <- function (x, ...) UseMethod("randomForest")
+
 #' randomForest: Classification and Regression with Random Forest
 #' randomForest implements Breiman's random forest algorithm (based on Breiman and Cutler's original Fortran code) for classification and regression.
 #' It can also be used in unsupervised mode for assessing proximities among data points.
@@ -793,11 +796,6 @@ cumimp.combinedGradientForest <-
 #' f1 <- gradientForest(data.frame(Ysimulation,Xsimulation), preds, specs, ntree=10)
 #' f1
 #' @export
-randomForest <- function (x, ...) {
-  UseMethod("randomForest")
-}
-
-
 randomForest.default <- function (x, y = NULL, xtest = NULL, ytest = NULL, ntree = 500,
                                   mtry = if (!is.null(y) && !is.factor(y)) max(floor(ncol(x)/3),
                                                                                1) else floor(sqrt(ncol(x))), replace = TRUE, classwt = NULL,
