@@ -17,7 +17,8 @@ RoxygenNote: 7.1.2
 Imports:
         climateStability,
         roperators,
-        raster
+        raster,
+        randomForest
 Suggests: 
     knitr,
     rmarkdown
